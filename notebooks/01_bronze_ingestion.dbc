@@ -1,0 +1,37 @@
+catalog = "lufthansa"
+schema  = "bronze"
+
+RAW_BASE    = f"/Volumes/{catalog}/{schema}/raw_vol"        # points to data/raw
+BRONZE_BASE = f"/Volumes/{catalog}/{schema}/bronze_data"    # points to bronze/
+
+files = {
+    "orders":        "olist_orders_dataset.csv",
+    "order_items":   "olist_order_items_dataset.csv",
+    "customers":     "olist_customers_dataset.csv",
+    "products":      "olist_products_dataset.csv",
+    "sellers":       "olist_sellers_dataset.csv",
+    "payments":      "olist_order_payments_dataset.csv",
+    "reviews":       "olist_order_reviews_dataset.csv",
+}
+
+spark.sql(f"USE CATALOG {catalog}")
+spark.sql(f"USE SCHEMA {schema}")
+
+for table, filename in files.items():
+    src = f"{RAW_BASE}/{filename}"
+    dst = f"{BRONZE_BASE}/bronze_{table}"     
+
+    print(f"Reading {src}")
+    df = (spark.read
+             .option("header", "true")
+             .option("inferSchema", "true")
+             .csv(src))
+
+    print(f"Writing Delta to {dst}")
+    (df.write
+       .format("delta")
+       .mode("overwrite")
+       .option("overwriteSchema", "true")
+       .save(dst))
+
+print("Bronze ingestion complete.")

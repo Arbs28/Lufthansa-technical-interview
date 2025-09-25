@@ -1,0 +1,154 @@
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+catalog = "lufthansa"
+bronze  = "bronze"
+silver  = "silver"
+gold    = "gold"
+
+# Volume-backed paths
+BRONZE_BASE = f"/Volumes/{catalog}/{bronze}/bronze_vol"
+SILVER_BASE = f"/Volumes/{catalog}/{silver}/silver_vol"
+GOLD_BASE   = f"/Volumes/{catalog}/{gold}/gold_vol"
+
+# Use the right catalog/schema for any SQL you might add
+spark.sql(f"USE CATALOG {catalog}")
+spark.sql(f"USE SCHEMA {gold}")
+
+# ---- Load source data ----
+silver_orders = spark.read.format("delta").load(f"{SILVER_BASE}/silver_orders")
+bronze_items  = spark.read.format("delta").load(f"{BRONZE_BASE}/bronze_order_items")
+bronze_prods  = spark.read.format("delta").load(f"{BRONZE_BASE}/bronze_products")
+bronze_custs  = spark.read.format("delta").load(f"{BRONZE_BASE}/bronze_customers")
+
+# Ensure needed types / columns exist
+# We expect silver_orders to contain:
+#   order_id, customer_id, seller_id (may be null if multi-seller), order_purchase_ts (timestamp),
+#   delivery_time_days (int), total_price_order (double)
+# If your silver schema differs, adjust the column names below accordingly.
+
+# ---------- (1) Cumulative sales per customer ----------
+# Window by customer, ordered by purchase time
+w_cust = Window.partitionBy("customer_id").orderBy("order_purchase_ts") \
+               .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+
+cum_sales = (silver_orders
+    .select("customer_id", "order_id", "order_purchase_ts", "total_price_order")
+    .withColumn("cumulative_sales",
+                F.sum(F.col("total_price_order")).over(w_cust))
+)
+
+dst1 = f"{GOLD_BASE}/gold_cumulative_sales_per_customer"
+(cum_sales.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .save(dst1))
+
+print("Wrote:", dst1)
+
+# ---------- (2) Rolling avg delivery time by product category ----------
+# Bring delivery_time_days to the item level by joining items->orders,
+# then join products to get product_category_name.
+items_with_order = (bronze_items
+    .select("order_id", "product_id")  # one row per item
+    .join(silver_orders.select("order_id", "order_purchase_ts", "delivery_time_days"),
+          "order_id", "left")
+)
+
+items_with_cat = (items_with_order
+    .join(bronze_prods.select("product_id", "product_category_name"), "product_id", "left")
+    .where(F.col("product_category_name").isNotNull())
+)
+
+# Rolling window: last 30 items per category (rows-based window).
+# If you prefer time-based (e.g., 30 days), we can switch to a time window, but item-count window is stable.
+w_cat = Window.partitionBy("product_category_name") \
+              .orderBy("order_purchase_ts") \
+              .rowsBetween(-29, 0)  # last 30 items incl. current
+
+rolling = (items_with_cat
+    .select("product_category_name", "order_purchase_ts", "delivery_time_days")
+    .withColumn("rolling_avg_delivery_days",
+                F.avg("delivery_time_days").over(w_cat))
+    .withColumn("current_delivery_days", F.col("delivery_time_days"))
+)
+
+dst2 = f"{GOLD_BASE}/gold_rolling_delivery_by_category"
+(rolling.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .save(dst2))
+
+print("Wrote:", dst2)
+
+# ---------- (3) KPI Summary tables ----------
+
+# 3a) Total sales per category
+# Compute per-item total (price + freight) from bronze items and join products for category,
+# then aggregate; we could also sum total_price_order by order and distribute, but per-item is cleaner.
+items_priced = (bronze_items
+    .withColumn("price_d",   F.col("price").cast("double"))
+    .withColumn("freight_d", F.col("freight_value").cast("double"))
+    .withColumn("total_price_item", F.col("price_d") + F.col("freight_d"))
+    .select("order_id", "product_id", "total_price_item")
+)
+
+sales_by_cat = (items_priced
+    .join(bronze_prods.select("product_id", "product_category_name"), "product_id", "left")
+    .groupBy("product_category_name")
+    .agg(F.sum("total_price_item").alias("total_sales"))
+)
+
+dst3 = f"{GOLD_BASE}/gold_sales_by_category"
+(sales_by_cat.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .save(dst3))
+print("Wrote:", dst3)
+
+# 3b) Avg delivery time per seller
+# Join distinct (order_id, seller_id) from bronze items with delivery_time_days from silver_orders
+seller_orders = (bronze_items
+    .select("order_id", "seller_id")
+    .dropna(subset=["order_id", "seller_id"])
+    .dropDuplicates(["order_id", "seller_id"])
+    .join(
+        silver_orders.select("order_id", "delivery_time_days"),
+        on="order_id",
+        how="inner"
+    )
+)
+
+avg_delivery_by_seller = (seller_orders
+    .groupBy("seller_id")
+    .agg(F.avg("delivery_time_days").alias("avg_delivery_days"))
+)
+
+dst4 = f"{GOLD_BASE}/gold_avg_delivery_by_seller"
+(avg_delivery_by_seller.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .save(dst4))
+print("Wrote:", dst4)
+
+
+# 3c) Number of Orders by Customer State
+orders_by_state = (silver_orders
+    .join(bronze_custs.select("customer_id", "customer_state"), "customer_id", "left")
+    .groupBy("customer_state")
+    .agg(F.countDistinct("order_id").alias("order_count"))
+)
+
+dst5 = f"{GOLD_BASE}/gold_orders_by_state"
+(orders_by_state.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .save(dst5))
+print("Wrote:", dst5)
+
+print("Gold layer complete.")

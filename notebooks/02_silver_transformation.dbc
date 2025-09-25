@@ -1,0 +1,80 @@
+catalog = "lufthansa"
+bronze  = "bronze"
+silver  = "silver"
+
+BRONZE_BASE = f"/Volumes/{catalog}/{bronze}/bronze_vol"
+SILVER_BASE = f"/Volumes/{catalog}/{silver}/silver_vol"
+
+spark.sql(f"USE CATALOG {catalog}")
+spark.sql(f"USE SCHEMA {silver}")
+
+# Load Bronze tables as DataFrames from Volumes
+orders_df = spark.read.format("delta").load(f"{BRONZE_BASE}/bronze_orders")
+items_df  = spark.read.format("delta").load(f"{BRONZE_BASE}/bronze_order_items")
+pays_df   = spark.read.format("delta").load(f"{BRONZE_BASE}/bronze_payments")
+
+# Data cleaning
+orders_df = (orders_df
+             .dropna(subset=["order_id"])
+             .dropDuplicates(["order_id"]))
+
+items_df  = (items_df
+             .dropna(subset=["order_id","product_id"])
+             .dropDuplicates(["order_id","order_item_id","product_id"]))
+
+pays_df   = (pays_df
+             .dropna(subset=["order_id"])
+             .dropDuplicates(["order_id","payment_sequential"]))
+
+from pyspark.sql.functions import col, to_timestamp, datediff, sum as _sum, count as _count, first, expr, countDistinct
+
+orders_ts = (orders_df
+    .withColumn("order_purchase_ts", to_timestamp(col("order_purchase_timestamp")))
+    .withColumn("order_approved_ts", to_timestamp(col("order_approved_at")))
+    .withColumn("order_delivered_carrier_ts", to_timestamp(col("order_delivered_carrier_date")))
+    .withColumn("order_delivered_customer_ts", to_timestamp(col("order_delivered_customer_date")))
+)
+
+# Per-item metrics in items
+items_enriched = (items_df
+    .withColumn("price_d", expr("CAST(price AS DOUBLE)"))
+    .withColumn("freight_d", expr("CAST(freight_value AS DOUBLE)"))
+    .withColumn("total_price_item", expr("price_d + freight_d"))
+    .withColumn("profit_margin_item", expr("price_d - freight_d"))
+)
+
+# Aggregate items to order-level metrics
+
+items_agg = (items_enriched.groupBy("order_id")
+    .agg(
+        _sum("total_price_item").alias("total_price_order"),
+        _sum("profit_margin_item").alias("profit_margin_order"),
+        countDistinct("product_id").alias("product_count")
+    )
+)
+
+
+# Aggregate payments to order-level payment_count
+pays_agg = (pays_df.groupBy("order_id")
+    .agg(_sum(expr("CAST(payment_installments AS INT)")).alias("payment_count"))
+)
+
+# Join all together
+silver_orders = (orders_ts.alias("o")
+    .join(items_agg.alias("i"), "order_id", "left")
+    .join(pays_agg.alias("p"), "order_id", "left")
+    .withColumn(
+        "delivery_time_days",
+        datediff(col("o.order_delivered_customer_ts"), col("o.order_purchase_ts"))
+    )
+)
+
+# Write Silver Delta to /Volumes/.../silver_vol/silver_orders
+dst = f"{SILVER_BASE}/silver_orders"
+(silver_orders.write
+   .format("delta")
+   .mode("overwrite")
+   .option("overwriteSchema", "true")
+   .save(dst))
+
+print("Silver table written:", dst)
