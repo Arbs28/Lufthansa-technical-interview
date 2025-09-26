@@ -1,103 +1,56 @@
-# Run only on commits to master
 trigger:
   branches: { include: [ master ] }
-  paths:    { include: [ infrastructure/**, azure-pipelines.yml ] }
-
+  paths:    { include: [ infrastructure/**, scripts/**, azure-pipelines.yml ] }
 pr: none
 
-pool:
-  name: SelfHosted
-
-variables:
-  TF_IN_AUTOMATION: 'true'
-  TF_INPUT: 'false'
-  environment: 'dev'  
+pool: { name: SelfHosted }
 
 stages:
 - stage: Validate
-  displayName: Terraform validate & format
   jobs:
   - job: validate
     steps:
     - checkout: self
-      persistCredentials: true
-
     - task: AzureCLI@2
-      displayName: Azure login (service connection)
+      displayName: Validate
       inputs:
         azureSubscription: 'azure-rm-sc'
         scriptType: bash
         addSpnToEnvironment: true
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -e
-          export ARM_CLIENT_ID="$servicePrincipalId"
-          export ARM_TENANT_ID="$tenantId"
-          export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
-          export ARM_CLIENT_SECRET="$servicePrincipalKey"
-
-          cd infrastructure
-          terraform init -input=false
-          terraform fmt -check -diff
-          terraform validate
+        scriptLocation: scriptPath
+        scriptPath: scripts/tf_validate.sh
 
 - stage: Plan
-  displayName: Terraform plan
   dependsOn: Validate
   jobs:
   - job: plan
     steps:
     - checkout: self
-      persistCredentials: true
-
     - task: AzureCLI@2
-      displayName: Azure login (service connection)
+      displayName: Plan
       inputs:
         azureSubscription: 'azure-rm-sc'
         scriptType: bash
         addSpnToEnvironment: true
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -e
-          export ARM_CLIENT_ID="$servicePrincipalId"
-          export ARM_TENANT_ID="$tenantId"
-          export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
-          export ARM_CLIENT_SECRET="$servicePrincipalKey"
-
-          cd infrastructure
-          terraform init -input=false
-          terraform plan -input=false -out=tfplan -var="environment=$(environment)"
-
+        scriptLocation: scriptPath
+        scriptPath: scripts/tf_plan.sh
     - publish: infrastructure/tfplan
       artifact: tfplan
 
 - stage: Apply
-  displayName: Terraform apply
   dependsOn: Plan
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
   jobs:
   - job: apply
     steps:
     - checkout: self
-      persistCredentials: true
-
     - download: current
       artifact: tfplan
-
     - task: AzureCLI@2
-      displayName: Azure login (service connection)
+      displayName: Apply
       inputs:
         azureSubscription: 'azure-rm-sc'
         scriptType: bash
         addSpnToEnvironment: true
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -e
-          export ARM_CLIENT_ID="$servicePrincipalId"
-          export ARM_TENANT_ID="$tenantId"
-          export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
-          export ARM_CLIENT_SECRET="$servicePrincipalKey"
-
-          cd infrastructure
-          terraform init -input=false
-          terraform apply -input=false -auto-approve tfplan
+        scriptLocation: scriptPath
+        scriptPath: scripts/tf_apply.sh
