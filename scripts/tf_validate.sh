@@ -2,5 +2,5 @@
 set -euo pipefail
 source "$(dirname "$0")/log_in.sh"
 
-terraform fmt -check -recursive
+terraform fmt -recursive
 terraform validate

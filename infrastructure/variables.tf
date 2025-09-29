@@ -46,8 +46,9 @@ variable "workspace_name" {
   default     = "dbw_lufthansa_gwc"
 }
 
-variable "storage_name_prefix" {
+variable "storage_account_name" {
   description = "Prefix for storage account (lowercase letters/numbers, 3-11 chars)"
   type        = string
-  default     = "lufthansagwc"
+  default     = "lufthansagwc7109ej"
 }
+

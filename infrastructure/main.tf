@@ -6,10 +6,6 @@ terraform {
       source  = "hashicorp/azurerm"
       version = ">= 3.100.0"
     }
-    random = {
-      source  = "hashicorp/random"
-      version = ">= 3.5.0"
-    }
   }
 }
 
@@ -110,16 +106,8 @@ resource "azurerm_subnet_network_security_group_association" "private" {
 # -----------------------------
 # ADLS Gen2 (StorageV2 + HNS) + unity-catalog container
 # -----------------------------
-resource "random_string" "suffix" {
-  length  = 6
-  lower   = true
-  upper   = false
-  numeric = true
-  special = false
-}
-
 resource "azurerm_storage_account" "this" {
-  name                     = lower(format("%s%s", var.storage_name_prefix, random_string.suffix.result))
+  name                     = var.storage_account_name
   resource_group_name      = azurerm_resource_group.this.name
   location                 = azurerm_resource_group.this.location
   account_tier             = "Standard"
@@ -131,7 +119,7 @@ resource "azurerm_storage_account" "this" {
 
 resource "azurerm_storage_container" "unity_catalog" {
   name                  = "lufthansa-uc"
-  storage_account_name  = azurerm_storage_account.this.name
+  storage_account_id  = azurerm_storage_account.this.id
   container_access_type = "private"
 }
 
