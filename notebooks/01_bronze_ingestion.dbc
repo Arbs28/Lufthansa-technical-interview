@@ -2,7 +2,7 @@ catalog = "lufthansa"
 schema  = "bronze"
 
 RAW_BASE    = f"/Volumes/{catalog}/{schema}/raw_vol"        # points to data/raw
-BRONZE_BASE = f"/Volumes/{catalog}/{schema}/bronze_data"    # points to bronze/
+BRONZE_BASE = f"/Volumes/{catalog}/{schema}/bronze_vol"    # points to bronze/
 
 files = {
     "orders":        "olist_orders_dataset.csv",
